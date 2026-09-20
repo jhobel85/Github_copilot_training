@@ -1,0 +1,12 @@
+{
+	"servers": {
+		"my-mcp-server-63e58bda": {
+			"type": "stdio",
+			"command": "C:\\Users\\Administrator\\Documents\\mcp\\venv\\Scripts\\python.exe",
+			"args": [
+				"C:\\Users\\Administrator\\Documents\\mcp\\mian.py"
+			]
+		}
+	},
+	"inputs": []
+}

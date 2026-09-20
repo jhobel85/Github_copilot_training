@@ -1,0 +1,6 @@
+line-length = 110
+target-version = "py314"
+
+[lint]
+# Depends()/Query() in argument defaults is FastAPI's documented DI pattern, not a mutable-default bug.
+ignore = ["B008"]
