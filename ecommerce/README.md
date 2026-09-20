@@ -40,6 +40,39 @@ failures. Their structured `data` contains `type`, `service`, `detail`, and `sta
 on `upstream_not_found` for a missing resource, `upstream_unavailable` for connection failures and upstream
 `5xx` responses, and `upstream_rejected` for other upstream `4xx` responses.
 
+## Testing
+
+- Unit/integration tests are per-service under `services/<service>/tests` (`pytest` from the service dir).
+- A cross-service browser test lives in `tests/browser/`. It boots all three services as real uvicorn
+  subprocesses on ports 8101-8103 (isolated temp databases, dedicated test API key) and drives each
+  Swagger UI (`/docs`) in a Playwright Chromium browser the same way a human would: Authorize,
+  Try it out, fill the form, Execute, then asserts the rendered response for 200/201, 404, 422 and
+  409 cases plus the product -> inventory -> order inventory-delta invariants.
+  Requires the dependency: `pip install -r requirements-dev.txt && python -m playwright install chromium`.
+  It is excluded from default runs (registered as the `browser` mark), so CI/local runs need it explicitly:
+
+```
+python -m pytest -m browser            # headless (default)
+BROWSER_HEADLESS=0 python -m pytest -m browser            # live visible Chromium window (on the test machine)
+BROWSER_VIDEO=1 python -m pytest -m browser               # record a WebM to tests/browser/video/
+BROWSER_SLOWMO=500 python -m pytest -m browser            # slow each Playwright action by 500ms
+BROWSER_VIEW_PAUSE_SECONDS=120 python -m pytest -m browser   # keep the stack up 120s after the run
+```
+
+**Watching it from your own machine — zero manual steps.** When `cloudflared` is installed
+(`curl -L -o ~/.local/bin/cloudflared
+https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 &&
+chmod +x ~/.local/bin/cloudflared`), every run starts temporary, account-less Cloudflare quick
+tunnels for the three services and prints public `*.trycloudflare.com/docs` URLs in the pytest
+output — open them in any browser to browse the live stack (read/write against the temporary
+test data). Tunnels and services are always torn down when the session ends; if `cloudflared` is
+absent or the machine is offline, the run degrades to local-only with a stderr notice.
+Tunnels require **outbound port 7844 (UDP, or TCP as fallback)** which Cloudflare uses for its
+edges — corporate egress proxies that block it (e.g. the "CONNECTIVITY PRE-CHECKS" showing
+`QUIC connection failed` / `HTTP/2 connection is blocked`) need IT to allow that port, or the
+suite must run on a machine without that restriction. The test itself only needs local
+loopback, so it passes regardless.
+
 ## Authentication and pagination
 
 Every `/products`, `/inventory`, and `/orders` endpoint requires `X-API-Key` matching the service's

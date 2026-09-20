@@ -6,3 +6,5 @@ venv/
 *.egg-info/
 *.db
 .coverage
+tests/browser/artifacts/
+tests/browser/video/
