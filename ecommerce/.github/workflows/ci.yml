@@ -22,13 +22,33 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [product_service, inventory_service, order_service, mcp_server]
+        include:
+          - service: product_service
+            cov_floor: 90
+          - service: inventory_service
+            cov_floor: 90
+          - service: order_service
+            cov_floor: 90
+          - service: mcp_server
+            cov_floor: 95
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+      - run: pip install -r requirements-dev.txt
       - run: pip install -r requirements.txt
         working-directory: services/${{ matrix.service }}
-      - run: pytest -q
+      - run: pytest -q --cov=app --cov-report=term --cov-fail-under=${{ matrix.cov_floor }}
         working-directory: services/${{ matrix.service }}
+
+  docker-smoke:
+    # Exercises the composed deployment end-to-end (health gates, cross-container order
+    # flow, idempotent replay, persistence across restart) — the same checks a manual
+    # `docker compose up` session would perform. Runs scripts/compose_smoke.sh.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose version
+      - run: docker compose config --quiet
+      - run: bash scripts/compose_smoke.sh

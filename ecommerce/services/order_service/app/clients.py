@@ -106,21 +106,15 @@ class InventoryClient:
         return inventory
 
     def _adjust_quantity(self, product_id: str, delta: int, idempotency_key: str | None = None) -> None:
-        headers = _upstream_headers(self._api_key)
-        if idempotency_key is not None:
-            headers["Idempotency-Key"] = idempotency_key
-        try:
-            response = self._client.patch(
-                f"{self._base_url}/inventory/{product_id}",
-                json={"quantityDelta": delta},
-                headers=headers,
-            )
-        except httpx.TimeoutException as exc:
-            logger.error("Inventory Service timed out updating product '%s'", product_id)
-            raise UpstreamUnavailableError("inventory", "Inventory Service request timed out") from exc
-        except httpx.HTTPError as exc:
-            logger.error("Inventory Service update failed for product '%s': %s", product_id, exc)
-            raise UpstreamUnavailableError("inventory", "Inventory Service request failed") from exc
+        response = _patch_with_key_protected_retry(
+            client=self._client,
+            url=f"{self._base_url}/inventory/{product_id}",
+            payload={"quantityDelta": delta},
+            headers=_upstream_headers(self._api_key),
+            idempotency_key=idempotency_key,
+            product_id=product_id,
+            sleep=self._sleep,
+        )
 
         if response.status_code == 404:
             raise UpstreamNotFoundError(f"Inventory for product '{product_id}' not found")
@@ -168,6 +162,49 @@ def _get_with_retry(
 
         sleep(INITIAL_RETRY_DELAY_SECONDS * (2**attempt))
 
+    raise RuntimeError("unreachable")
+
+
+def _patch_with_key_protected_retry(
+    client: httpx.Client,
+    url: str,
+    payload: dict[str, int],
+    headers: dict[str, str],
+    idempotency_key: str | None,
+    product_id: str,
+    sleep: Callable[[float], None],
+) -> httpx.Response:
+    """Single-attempt PATCH unless the request failed at the transport layer.
+
+    A `httpx.RequestError` (connect/timeout/read failure) leaves it ambiguous whether the
+    adjustment reached Inventory Service. When the caller supplied an `Idempotency-Key` —
+    order creation and cancellation always do — one extra attempt with the *same* key is
+    safe: Inventory replays recorded keys with the stored snapshot, so a duplicate delta
+    cannot land. Without a key, any retry is a double-decrement risk, so we stay
+    single-attempt. Non-transport `HTTPError`s and any received response (including 5xx)
+    are never retried here: explicit responses surface via the caller's status mapping,
+    and the caller's own key-based retry covers them.
+    """
+    max_attempts = 2 if idempotency_key is not None else 1
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    for attempt in range(max_attempts):
+        try:
+            return client.patch(url, json=payload, headers=headers)
+        except httpx.RequestError as exc:
+            if attempt == max_attempts - 1:
+                if isinstance(exc, httpx.TimeoutException):
+                    logger.error("Inventory Service timed out updating product '%s'", product_id)
+                    raise UpstreamUnavailableError(
+                        "inventory", "Inventory Service request timed out"
+                    ) from exc
+                logger.error("Inventory Service update failed for product '%s': %s", product_id, exc)
+                raise UpstreamUnavailableError("inventory", "Inventory Service request failed") from exc
+            sleep(INITIAL_RETRY_DELAY_SECONDS * (2**attempt))
+        except httpx.HTTPError as exc:
+            # Non-transport failure (e.g. invalid URL): never retriable, surfaced as 502 as before.
+            logger.error("Inventory Service update failed for product '%s': %s", product_id, exc)
+            raise UpstreamUnavailableError("inventory", "Inventory Service request failed") from exc
     raise RuntimeError("unreachable")
 
 

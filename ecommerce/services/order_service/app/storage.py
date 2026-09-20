@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy import delete, text
 
+from app.config import IDEMPOTENCY_TTL_SECONDS
 from app.db import (
     Base,
     OrderIdempotencyClaimORM,
@@ -78,6 +79,7 @@ class OrderRepository:
     ) -> Order:
         owner_token = str(uuid4())
         deadline = time.monotonic() + IDEMPOTENCY_WAIT_SECONDS
+        self._prune_expired_idempotency()
 
         while True:
             outcome = self._claim_or_replay(idempotency_key, request_identity, owner_token)
@@ -186,10 +188,21 @@ class OrderRepository:
                     requestIdentity=request_identity,
                     orderId=order.id,
                     responseSnapshot=persisted_order.model_dump_json(),
+                    createdAt=datetime.now(UTC),
                 )
             )
             session.flush()
             return persisted_order
+
+    @staticmethod
+    def _prune_expired_idempotency() -> None:
+        """Drop settled idempotency records older than the TTL so persistent volumes
+        stay bounded. In-flight claims live in a separate table and never qualify; a
+        replay that arrives after its record was pruned simply behaves like a new request.
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=IDEMPOTENCY_TTL_SECONDS)
+        with session_scope() as session:
+            session.execute(delete(OrderIdempotencyORM).where(OrderIdempotencyORM.createdAt < cutoff))
 
     @staticmethod
     def _validate_identity(stored_identity: str, request_identity: str) -> None:

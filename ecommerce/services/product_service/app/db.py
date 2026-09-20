@@ -13,8 +13,36 @@ from sqlalchemy.pool import StaticPool
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./product_service.db")
 
 _is_sqlite = DATABASE_URL.startswith("sqlite")
-_connect_args = {"check_same_thread": False} if _is_sqlite else {}
-_poolclass = StaticPool if DATABASE_URL.endswith(":memory:") else None
+_is_in_memory = DATABASE_URL.endswith(":memory:")
+
+
+def busy_timeout_for(url: str) -> float | None:
+    """Busy timeout for a database URL, or `None` to keep the driver default.
+
+    A longer busy timeout avoids `SQLITE_BUSY` when a file-backed writer and reader contend
+    (e.g. the compose healthcheck reader vs. the app writer). In-memory + StaticPool never
+    blocks, so the driver default is kept there to surface test logic errors fast.
+    """
+    if url.startswith("sqlite") and not url.endswith(":memory:"):
+        return 30.0
+    return None
+
+
+def database_is_in_memory() -> bool:
+    return DATABASE_URL.endswith(":memory:")
+
+
+def database_url_supports_busy_timeout(url: str = DATABASE_URL) -> bool:
+    return busy_timeout_for(url) is not None
+
+
+_poolclass = StaticPool if _is_in_memory else None
+_connect_args: dict[str, object] = {}
+if _is_sqlite:
+    _connect_args["check_same_thread"] = False
+    _timeout = busy_timeout_for(DATABASE_URL)
+    if _timeout is not None:
+        _connect_args["timeout"] = _timeout
 
 engine = create_engine(DATABASE_URL, connect_args=_connect_args, poolclass=_poolclass)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)

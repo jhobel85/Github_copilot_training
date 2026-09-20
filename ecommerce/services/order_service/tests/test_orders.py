@@ -191,7 +191,42 @@ def test_inventory_get_retries_server_errors_then_succeeds():
     assert http_client.get_calls == 3
 
 
-def test_inventory_patch_is_not_retried_after_request_failure():
+def test_inventory_patch_is_retried_once_with_same_key_after_transport_failure():
+    request = httpx.Request("PATCH", "http://inventory/inventory/P100")
+    http_client = SequencedHttpClient(
+        [
+            httpx.ReadTimeout("ambiguous outcome", request=request),
+            json_response(200, {"productId": "P100", "quantity": 3}),
+        ]
+    )
+    delays: list[float] = []
+
+    InventoryClient(http_client=http_client, sleep=delays.append).reduce_inventory("P100", 2, "order-key")
+
+    assert http_client.patch_calls == 2
+    sent_keys = [kwargs["headers"]["Idempotency-Key"] for kwargs in http_client.patch_kwargs]
+    assert sent_keys == ["order-key", "order-key"]
+    assert delays == [0.1]
+
+
+def test_inventory_patch_raises_unavailable_after_retried_transport_failure():
+    request = httpx.Request("PATCH", "http://inventory/inventory/P100")
+    http_client = SequencedHttpClient(
+        [
+            httpx.ConnectError("connection refused", request=request),
+            httpx.ReadError("connection reset", request=request),
+        ]
+    )
+
+    with pytest.raises(UpstreamUnavailableError, match="request failed"):
+        InventoryClient(http_client=http_client, sleep=lambda _: None).reduce_inventory(
+            "P100", 2, "order-key"
+        )
+
+    assert http_client.patch_calls == 2
+
+
+def test_inventory_patch_is_single_attempt_without_idempotency_key():
     request = httpx.Request("PATCH", "http://inventory/inventory/P100")
     http_client = SequencedHttpClient(
         [
@@ -200,7 +235,21 @@ def test_inventory_patch_is_not_retried_after_request_failure():
         ]
     )
 
-    with pytest.raises(UpstreamUnavailableError):
+    with pytest.raises(UpstreamUnavailableError, match="timed out"):
+        InventoryClient(http_client=http_client, sleep=lambda _: None).reduce_inventory("P100", 2)
+
+    assert http_client.patch_calls == 1
+
+
+def test_inventory_patch_is_not_retried_on_5xx_response():
+    http_client = SequencedHttpClient(
+        [
+            json_response(503, {"detail": "upstream unavailable"}),
+            json_response(200, {"productId": "P100", "quantity": 3}),
+        ]
+    )
+
+    with pytest.raises(UpstreamUnavailableError, match="returned 503"):
         InventoryClient(http_client=http_client, sleep=lambda _: None).reduce_inventory(
             "P100", 2, "order-key"
         )

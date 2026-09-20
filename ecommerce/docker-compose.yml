@@ -1,9 +1,15 @@
+# Ports are published on all interfaces for the local dev/MCP workflow. Scope them
+# (e.g. "127.0.0.1:8001:8001") in non-local deployments.
 services:
   product:
     build:
       context: ./services/product_service
     ports:
       - "8001:8001"
+    read_only: true
+    restart: on-failure
+    tmpfs:
+      - /tmp
     environment:
       API_KEY: local-development-api-key
       DATABASE_URL: sqlite:////data/product_service.db
@@ -20,6 +26,10 @@ services:
       context: ./services/inventory_service
     ports:
       - "8002:8002"
+    read_only: true
+    restart: on-failure
+    tmpfs:
+      - /tmp
     environment:
       API_KEY: local-development-api-key
       DATABASE_URL: sqlite:////data/inventory_service.db
@@ -36,6 +46,10 @@ services:
       context: ./services/order_service
     ports:
       - "8003:8003"
+    read_only: true
+    restart: on-failure
+    tmpfs:
+      - /tmp
     environment:
       API_KEY: local-development-api-key
       PRODUCT_SERVICE_URL: http://product:8001

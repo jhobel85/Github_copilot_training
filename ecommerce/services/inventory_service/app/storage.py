@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 
+from app.config import IDEMPOTENCY_TTL_SECONDS
 from app.db import AppliedInventoryAdjustmentORM, Base, InventoryORM, engine, session_scope
 from app.models import InventoryCreate, InventoryItem, InventoryUpdate
 
@@ -69,10 +71,12 @@ class InventoryRepository:
         # Explicit nulls are treated as "no change" so PATCH can never null out a required field.
         updates = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
         delta = updates.pop("quantityDelta", None)
+        now = datetime.now(UTC)
 
         try:
             with session_scope() as session:
                 if delta is not None and idempotency_key is not None:
+                    self._prune_expired_adjustments(session, now)
                     applied = session.get(AppliedInventoryAdjustmentORM, idempotency_key)
                     if applied is not None:
                         return self._replay(applied, product_id, delta)
@@ -87,7 +91,7 @@ class InventoryRepository:
                     result = session.execute(
                         sa_update(InventoryORM)
                         .where(InventoryORM.productId == product_id, InventoryORM.quantity + delta >= 0)
-                        .values(quantity=InventoryORM.quantity + delta, lastUpdated=datetime.now(UTC))
+                        .values(quantity=InventoryORM.quantity + delta, lastUpdated=now)
                     )
                     if result.rowcount == 0:
                         raise InsufficientInventoryError(product_id, row.quantity, -delta)
@@ -102,6 +106,7 @@ class InventoryRepository:
                                 resultWarehouse=item.warehouse,
                                 resultQuantity=item.quantity,
                                 resultLastUpdated=item.lastUpdated,
+                                appliedAt=now,
                             )
                         )
                         session.flush()
@@ -109,7 +114,7 @@ class InventoryRepository:
 
                 for field, value in updates.items():
                     setattr(row, field, value)
-                row.lastUpdated = datetime.now(UTC)
+                row.lastUpdated = now
                 session.flush()
                 session.refresh(row)
                 return InventoryItem.model_validate(row, from_attributes=True)
@@ -123,6 +128,19 @@ class InventoryRepository:
                 if applied is None:
                     raise
                 return self._replay(applied, product_id, delta)
+
+    @staticmethod
+    def _prune_expired_adjustments(session, now: datetime) -> None:
+        """Drop applied adjustments older than the TTL so persistent volumes stay bounded.
+
+        Runs inside the caller's transaction on each key-bearing delta, so there is no
+        cron and the work amortizes to one cheap indexed DELETE per adjustment. A replay
+        that arrives after its record was pruned simply behaves like a new request.
+        """
+        cutoff = now - timedelta(seconds=IDEMPOTENCY_TTL_SECONDS)
+        session.execute(
+            delete(AppliedInventoryAdjustmentORM).where(AppliedInventoryAdjustmentORM.appliedAt < cutoff)
+        )
 
     @staticmethod
     def _replay(
