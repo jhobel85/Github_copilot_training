@@ -57,6 +57,9 @@ Each service was already containerized in isolation; this phase composed them.
 **Verify:** `docker compose up`, then `POST /products` → `POST /inventory` → `POST /orders` against the
 published ports, and confirm the order reduces stock across container boundaries.
 
+**Verified:** `docker compose up -d --build` was run from the repo root and the full cross-container flow
+below completed — see [Docker verification](#docker-verification-completed).
+
 ## Phase 3 — CI workflow ✅ implemented
 
 The repository previously had no workflow under `.github/workflows/`.
@@ -198,11 +201,12 @@ Order Service reads the context-local ID when building every Product/Inventory r
 all retried `GET` attempts and single-attempt Inventory `PATCH` calls. Context-local storage prevents one
 concurrent request from overwriting another request's correlation ID.
 
-**Verified without Docker:** focused tests cover supplied and generated IDs, response headers, JSON fields,
+**Verified:** focused tests cover supplied and generated IDs, response headers, JSON fields,
 credential/body exclusion, concurrent-request isolation, and forwarding on Product `GET`, Inventory `GET`,
 and Inventory `PATCH`. Full API suites pass — product (20), inventory (29), order (56) — and repo-wide
-`ruff check .` / `ruff format --check .` are clean. Container log inspection was not run because Docker was
-unavailable; automated request/log capture verifies the same linkage contract.
+`ruff check .` / `ruff format --check .` are clean. Container log inspection was initially skipped because
+Docker was unavailable; it was completed later in the [Docker verification](#docker-verification-completed)
+run, where one `X-Request-ID` was observed across all three containers' JSON logs.
 
 ## Phase 8 — MCP server depth ✅ implemented
 
@@ -242,6 +246,38 @@ multi-page catalog loading. The MCP dependency is bounded to `mcp>=2.0,<3`.
 
 **Verified:** MCP tests pass (23), including real-service catalog loading, complete catalog pagination,
 authenticated pagination passthrough, and distinct missing-resource versus unavailable-service errors.
+
+## Docker verification (completed)
+
+All compose-level verification that was previously deferred due to Docker being unavailable has now been run
+locally (`docker compose up -d --build` from the repo root, Docker 29.6.2 / Compose v5.3.1), covering Phase 2's
+original verification step plus the runtime behavior of Phases 4–7 in a composed deployment:
+
+- **Health-gated startup (Phase 1/2).** `order` only started after `product` and `inventory` reported
+  `service_healthy` via `/health`, confirming `depends_on: condition: service_healthy` is wired correctly.
+- **Cross-container E2E (Phase 2's verify step).** `POST /products` (201) → `POST /inventory` (201, qty 100)
+  → `POST /orders` (201) against the published ports; the order reduced inventory from 100 to 97 across
+  container boundaries, and the order's `unitPrice`/`totalPrice` were read from the Product Service over HTTP.
+- **Persistent idempotency (Phase 5).** Replaying `POST /orders` with the same `Idempotency-Key` returned the
+  identical order and left stock unchanged. After `docker compose restart`, replaying the same key again
+  returned the same order — the idempotency records survived because they live in the named SQLite volumes,
+  not in process memory.
+- **Pagination + auth (Phase 6).** `GET /products?limit=50&offset=0` with `X-API-Key` succeeded; the same
+  request without the key returned `401` with `{"detail":"Invalid or missing API key"}`; `/health` returned
+  `200` unauthenticated, as compose healthchecks and CI require.
+- **JSON logging + correlation (Phase 7), previously verified only without Docker.** A single
+  `X-Request-ID: docker-verify-req-99` on `POST /orders` appeared in the JSON logs of **all three
+  containers** — Order's inbound request and its `httpx` outbound log lines to Product and Inventory, plus
+  Product's and Inventory's inbound request-completion records — confirming both the JSON format
+  (`timestamp`/`level`/`service`/`logger`/`message`/`request_id` fields) and cross-container ID forwarding at
+  runtime. Supplied IDs are echoed in the response header, and an absent ID is generated server-side
+  (a fresh UUID was observed).
+- **Persistence (Phase 4's compose volumes).** After `docker compose restart`, the product, inventory
+  (quantity 96), and both orders were still present from the named `product-data` / `inventory-data` /
+  `order-data` volumes — container restarts do not lose data.
+
+After verification, `docker compose down` removed the containers and network, keeping the named volumes for
+local reuse.
 
 ## Sequencing
 
